@@ -16,7 +16,26 @@ from __future__ import annotations
 
 """Tool for web browse."""
 
+import ipaddress
+import socket
+import urllib.parse
 import requests
+
+
+def _is_safe_ip(ip_str: str) -> bool:
+  try:
+    ip = ipaddress.ip_address(ip_str)
+  except ValueError:
+    return False
+
+  if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast:
+    return False
+
+  # Explicitly check for known metadata service IP
+  if str(ip) == "169.254.169.254":
+    return False
+
+  return True
 
 
 def load_web_page(url: str) -> str:
@@ -30,15 +49,42 @@ def load_web_page(url: str) -> str:
   """
   from bs4 import BeautifulSoup
 
-  # Set allow_redirects=False to prevent SSRF attacks via redirection.
-  response = requests.get(url, allow_redirects=False)
+  try:
+    parsed_url = urllib.parse.urlparse(url)
+    if parsed_url.scheme not in ("http", "https"):
+      return f"Invalid URL scheme: {parsed_url.scheme}"
 
-  if response.status_code == 200:
-    soup = BeautifulSoup(response.content, 'lxml')
-    text = soup.get_text(separator='\n', strip=True)
-  else:
-    text = f'Failed to fetch url: {url}'
+    hostname = parsed_url.hostname
+    if not hostname:
+      return "Invalid URL: missing hostname"
 
-  # Split the text into lines, filtering out very short lines
-  # (e.g., single words or short subtitles)
-  return '\n'.join(line for line in text.splitlines() if len(line.split()) > 3)
+    # Resolve IP addresses and check against safe list
+    try:
+      addr_info = socket.getaddrinfo(hostname, None)
+    except socket.gaierror:
+      return f"Failed to resolve hostname: {hostname}"
+
+    for result in addr_info:
+      ip_addr = result[4][0]
+      if not _is_safe_ip(ip_addr):
+        return f"Access denied: URL resolves to a restricted IP address ({ip_addr})"
+
+    # We use the original URL to preserve SNI and SSL certificate validation.
+    # While this leaves a small TOCTOU window for DNS rebinding, it is
+    # necessary to support HTTPS without complex custom transport adapters.
+
+    # Set allow_redirects=False to prevent SSRF attacks via redirection.
+    response = requests.get(url, allow_redirects=False, timeout=10)
+
+    if response.status_code == 200:
+      soup = BeautifulSoup(response.content, 'lxml')
+      text = soup.get_text(separator='\n', strip=True)
+    else:
+      text = f'Failed to fetch url: {url} (Status Code: {response.status_code})'
+
+    # Split the text into lines, filtering out very short lines
+    # (e.g., single words or short subtitles)
+    return '\n'.join(line for line in text.splitlines() if len(line.split()) > 3)
+
+  except Exception as e:
+    return f'Error fetching url: {url} ({e})'
