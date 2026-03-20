@@ -255,7 +255,13 @@ class AgentTool(BaseTool):
       async for event in agen:
         # Forward state delta to parent session.
         if event.actions.state_delta:
-          tool_context.state.update(event.actions.state_delta)
+          # Filter out adk internal states before updating the parent session
+          filtered_state_delta = {
+              k: v
+              for k, v in event.actions.state_delta.items()
+              if not k.startswith('_adk')
+          }
+          tool_context.state.update(filtered_state_delta)
         if event.content:
           last_content = event.content
 
